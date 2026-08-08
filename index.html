@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<title>MindAR HD + MP4</title>
+
+<script>
+(() => {
+  const gum = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+  if (!gum) return;
+  navigator.mediaDevices.getUserMedia = async (constraints = {}) => {
+    const c = JSON.parse(JSON.stringify(constraints || {}));
+    const base = typeof c.video === "object" ? c.video : {};
+    c.video = {
+      ...base,
+      facingMode: base.facingMode || {ideal:"environment"},
+      width: {ideal:1920},
+      height: {ideal:1080},
+      frameRate: {ideal:30,max:30}
+    };
+    return gum(c);
+  };
+})();
+</script>
+
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#111;font-family:system-ui,"Microsoft JhengHei",sans-serif}
+#home{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:24px;background:#efe6d4}
+.panel{width:min(420px,100%);text-align:center;color:#2f281d}
+button{border:0;border-radius:12px;min-height:50px;padding:0 20px;font-size:18px;font-weight:700}
+#startBtn{width:100%;background:#2f281d;color:white}
+#arRoot{position:fixed;inset:0;opacity:0;pointer-events:none;background:#000}
+body.scanning #home{display:none}
+body.scanning #arRoot{opacity:1;pointer-events:auto;z-index:1500}
+a-scene{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;z-index:1500}
+body.scanning video,body.scanning canvas{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;object-fit:cover!important}
+#hud{display:none;position:fixed;z-index:3000;left:12px;right:12px;top:max(12px,env(safe-area-inset-top));pointer-events:none}
+body.scanning #hud{display:block}
+#status,#camInfo{margin:0 auto 8px;max-width:520px;padding:10px 12px;border-radius:12px;background:rgba(0,0,0,.68);color:white;text-align:center}
+#camInfo{font-size:13px}
+#stopBtn{position:fixed;right:14px;bottom:max(14px,env(safe-area-inset-bottom));z-index:3100;display:none;background:rgba(20,20,20,.82);color:#fff;border:1px solid rgba(255,255,255,.55)}
+body.scanning #stopBtn{display:block}
+</style>
+</head>
+
+<body>
+<div id="home">
+  <div class="panel">
+    <h1>MindAR HD + MP4</h1>
+    <p>優先要求 1920×1080 後鏡頭。辨識到 target 後，MP4 會立在明信片中央播放。</p>
+    <button id="startBtn">開始 AR 掃描</button>
+  </div>
+</div>
+
+<div id="arRoot">
+<a-scene id="arScene"
+  mindar-image="imageTargetSrc: ./targets.mind; autoStart: false;"
+  color-space="sRGB"
+  renderer="colorManagement: true, physicallyCorrectLights"
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: false"
+  embedded>
+  <a-assets>
+    <video id="arVideo" src="./q3.mp4" preload="auto" loop muted playsinline webkit-playsinline crossorigin="anonymous"></video>
+  </a-assets>
+  <a-camera position="0 0 0" look-controls="enabled:false"></a-camera>
+  <a-entity id="target0" mindar-image-target="targetIndex:0">
+    <a-video id="videoPlane" src="#arVideo"
+      width="1.0" height="0.5625"
+      position="0 0 0.28125"
+      rotation="90 0 180"
+      material="side:double;shader:flat;"
+      visible="false"></a-video>
+  </a-entity>
+</a-scene>
+</div>
+
+<div id="hud">
+  <div id="status">尚未啟動</div>
+  <div id="camInfo">Camera: 等待資訊…</div>
+</div>
+<button id="stopBtn">結束掃描</button>
+
+<script>
+const scene=document.getElementById("arScene");
+const startBtn=document.getElementById("startBtn");
+const stopBtn=document.getElementById("stopBtn");
+const status=document.getElementById("status");
+const camInfo=document.getElementById("camInfo");
+const target=document.getElementById("target0");
+const arVideo=document.getElementById("arVideo");
+const videoPlane=document.getElementById("videoPlane");
+let running=false, starting=false, ready=false, infoTimer=null;
+
+scene.addEventListener("loaded",()=>ready=true);
+
+function getSystem(){return scene.systems&&scene.systems["mindar-image-system"]}
+
+function waitSystem(timeout=8000){
+  return new Promise((resolve,reject)=>{
+    const t0=Date.now();
+    const timer=setInterval(()=>{
+      const s=getSystem();
+      if(s){clearInterval(timer);resolve(s)}
+      else if(Date.now()-t0>timeout){clearInterval(timer);reject(new Error("MindAR timeout"))}
+    },100);
+  });
+}
+
+async function unlockVideo(){
+  try{await arVideo.play();arVideo.pause();arVideo.currentTime=0}catch(e){}
+}
+
+function updateCamInfo(){
+  const vids=[...document.querySelectorAll("video")];
+  const cam=vids.find(v=>v!==arVideo&&v.srcObject);
+  if(!cam){camInfo.textContent="Camera: 尚未取得串流";return}
+  const track=cam.srcObject.getVideoTracks()[0];
+  const s=track.getSettings?track.getSettings():{};
+  camInfo.textContent=`Camera: ${cam.videoWidth||s.width||"?"}×${cam.videoHeight||s.height||"?"} @ ${Math.round(s.frameRate||0)||"?"}fps`;
+}
+
+async function startAR(){
+  if(starting||running)return;
+  starting=true;
+  document.body.classList.add("scanning");
+  status.textContent="正在啟動高解析度後鏡頭…";
+  try{
+    await unlockVideo();
+    if(!ready&&!scene.hasLoaded){
+      await new Promise(r=>scene.addEventListener("loaded",r,{once:true}));
+    }
+    const sys=await waitSystem();
+    await sys.start();
+    running=true;
+    status.textContent="相機已開啟，請對準 target";
+    infoTimer=setInterval(updateCamInfo,500);
+    setTimeout(updateCamInfo,500);
+  }catch(e){
+    console.error(e);
+    document.body.classList.remove("scanning");
+    alert("相機啟動失敗。請確認 HTTPS 與相機權限。");
+  }finally{starting=false}
+}
+
+async function stopAR(){
+  clearInterval(infoTimer);
+  try{
+    arVideo.pause();
+    videoPlane.setAttribute("visible",false);
+    const sys=getSystem();
+    if(sys&&running){await sys.stop()}
+  }catch(e){}
+  running=false;
+  document.body.classList.remove("scanning");
+}
+
+target.addEventListener("targetFound",async()=>{
+  status.textContent="辨識成功 ✓ MP4 已立起播放";
+  videoPlane.setAttribute("visible",true);
+  try{await arVideo.play()}catch(e){}
+});
+target.addEventListener("targetLost",()=>{
+  status.textContent="失去 target，請重新對準";
+  videoPlane.setAttribute("visible",false);
+  arVideo.pause();
+});
+
+startBtn.addEventListener("click",startAR);
+stopBtn.addEventListener("click",stopAR);
+</script>
+</body>
+</html>
